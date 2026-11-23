@@ -888,11 +888,53 @@ void UITask::onMessageArrived(const UiEvent& ev) {
   }
   if (ev.kind == UIEventType::channelMessage) _last_notif_ch_idx = ev.idx;
 
+  // Local mod: a channel or contact with Notif = Off stays off the screen too:
+  // no banner, no envelope, no wake. It still counts as unread, and notify()
+  // stays silent for it on its own.
+  bool muted = false;
+  if (_node_prefs && ev.kind == UIEventType::channelMessage && ev.idx >= 0 && ev.idx < 64) {
+    uint64_t m = 1ULL << ev.idx;
+    bool overridden = _node_prefs->ch_notif_override & m;
+    bool off = _node_prefs->ch_notif_muted & m;
+    // Local mod: public channels (the well-known Public key, or a "#topic"
+    // anyone can join) are silent and off the screen unless set to Notif = On.
+    bool is_public = false;
+    ChannelDetails cd;
+    if (the_mesh.getChannel(ev.idx, cd)) {
+      static const uint8_t PUBLIC_KEY[16] = { 0x8b, 0x33, 0x87, 0xe9, 0xc5, 0xcd, 0xea, 0x6a,
+                                              0xc9, 0xe5, 0xed, 0xba, 0xa1, 0x15, 0xcd, 0x72 };
+      is_public = cd.name[0] == '#' || strncasecmp(cd.name, "public", 6) == 0 ||
+                  memcmp(cd.channel.secret, PUBLIC_KEY, 16) == 0;
+    }
+    muted = overridden ? off : is_public;
+    if (muted) return;   // no sound either (notify() would still play a non-overridden channel)
+  } else if (_node_prefs && ev.kind == UIEventType::contactMessage && ev.flag) {
+    for (int i = 0; i < NodePrefs::DM_NOTIF_TABLE_MAX; i++)
+      if (_node_prefs->dm_notif[i].state && memcmp(_node_prefs->dm_notif[i].prefix, ev.key, 4) == 0) {
+        muted = _node_prefs->dm_notif[i].state == 1;
+        break;
+      }
+  }
+  if (muted) { notify(ev.kind); return; }
+
+  // Local mod: a direct message opens its conversation right away, when the
+  // screen was dark or showing the home pages (never over a draft, a menu or
+  // another screen the user is busy with).
+  bool was_dark = _display && !_display->isOn();
+  bool auto_open = false;
+  if (ev.kind == UIEventType::contactMessage && ev.flag && !_locked && _display &&
+      (was_dark || curr == home) && !isViewingDM(ev.key)) {
+    if (ContactInfo* ci = the_mesh.lookupContactByPubKey(ev.key, 4)) {
+      openContactDM(*ci);
+      auto_open = true;
+    }
+  }
+
   // No toast when the message lands in the thread that is open on screen:
   // it already shows up there, and the box would only cover it.
-  bool in_view = curr == messages_screen && _display && _display->isOn() && !_locked &&
+  bool in_view = auto_open || (curr == messages_screen && _display && _display->isOn() && !_locked &&
                  ((ev.kind == UIEventType::contactMessage && ev.flag && isViewingDM(ev.key)) ||
-                  (ev.kind == UIEventType::channelMessage && ev.idx >= 0 && isViewingChannel((uint8_t)ev.idx)));
+                  (ev.kind == UIEventType::channelMessage && ev.idx >= 0 && isViewingChannel((uint8_t)ev.idx))));
   const uint8_t style = _node_prefs ? _node_prefs->msg_alert : NodePrefs::MSG_ALERT_NORMAL;
   if (!in_view && style == NodePrefs::MSG_ALERT_COMPACT) {
     // The envelope counts the run: each message adds one and blinks it again.
